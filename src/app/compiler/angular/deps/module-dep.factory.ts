@@ -1,6 +1,5 @@
 import { IDep } from '../dependencies.interfaces';
 import { ModuleHelper } from './helpers/module-helper';
-import { ComponentCache } from './helpers/component-helper';
 import { ts } from 'ts-simple-ast';
 
 const crypto = require('crypto');
@@ -16,14 +15,18 @@ export class ModuleDepFactory {
         IO: any
     ): IModuleDep {
         let sourceCode = srcFile.getText();
-        let hash = crypto.createHash('md5').update(sourceCode).digest('hex');
+        let hash = crypto
+            .createHash('md5')
+            .update(sourceCode)
+            .digest('hex');
         return {
             name,
             id: 'module-' + name + '-' + hash,
             file: file,
             ngid: this.moduleHelper.getModuleId(properties, srcFile),
             providers: this.moduleHelper.getModuleProviders(properties, srcFile),
-            declarations: this.moduleHelper.getModuleDeclations(properties, srcFile),
+            declarations: this.moduleHelper.getModuleDeclarations(properties, srcFile),
+            controllers: this.moduleHelper.getModuleControllers(properties, srcFile),
             entryComponents: this.moduleHelper.getModuleEntryComponents(properties, srcFile),
             imports: this.moduleHelper.getModuleImports(properties, srcFile),
             exports: this.moduleHelper.getModuleExports(properties, srcFile),
@@ -40,6 +43,7 @@ export interface IModuleDep extends IDep {
     file: any;
     providers: Array<any>;
     declarations: Array<any>;
+    controllers: Array<any>;
     entryComponents: Array<any>;
     imports: Array<any>;
     exports: Array<any>;

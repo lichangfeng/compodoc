@@ -1,15 +1,11 @@
 import * as path from 'path';
-import * as util from 'util';
 
 import * as _ from 'lodash';
-import Ast, { ts, TypeGuards, SyntaxKind } from 'ts-simple-ast';
+import Ast, { ts, SyntaxKind } from 'ts-simple-ast';
 
-import { Configuration } from '../configuration';
-import { compilerHost, detectIndent } from '../../utilities';
 import { logger } from '../../logger';
 import { markedtags, mergeTagsAndArgs, cleanLifecycleHooksFromMethods } from '../../utils/utils';
 import { kindToType } from '../../utils/kind-to-type';
-import { ExtendsMerger } from '../../utils/extends-merger.util';
 import { $componentsTreeEngine } from '../engines/components-tree.engine';
 
 import { FrameworkDependencies } from './framework-dependencies';
@@ -20,20 +16,19 @@ import {
     ImportsUtil,
     isModuleWithProviders,
     getModuleWithProviders,
-    hasSpreadElementInArray,
     isIgnore
 } from '../../utils';
 
 import { CodeGenerator } from './angular/code-generator';
 
 import { DirectiveDepFactory } from './angular/deps/directive-dep.factory';
-import { ComponentHelper, ComponentCache } from './angular/deps/helpers/component-helper';
+import { ComponentCache } from './angular/deps/helpers/component-helper';
 import { ModuleDepFactory } from './angular/deps/module-dep.factory';
 import { ComponentDepFactory } from './angular/deps/component-dep.factory';
+import { ControllerDepFactory } from './angular/deps/controller-dep.factory';
 import { ModuleHelper } from './angular/deps/helpers/module-helper';
 import { JsDocHelper } from './angular/deps/helpers/js-doc-helper';
 import { SymbolHelper } from './angular/deps/helpers/symbol-helper';
-import { ClassHelper } from './angular/deps/helpers/class-helper';
 
 import { ConfigurationInterface } from '../interfaces/configuration.interface';
 
@@ -68,10 +63,7 @@ export class AngularDependencies extends FrameworkDependencies {
         configuration: ConfigurationInterface,
         routerParser: RouterParserUtil
     ) {
-        super(files,
-            options,
-            configuration,
-            routerParser);
+        super(files, options, configuration, routerParser);
     }
 
     public getDependencies() {
@@ -79,6 +71,7 @@ export class AngularDependencies extends FrameworkDependencies {
             modules: [],
             modulesForGraph: [],
             components: [],
+            controllers: [],
             injectables: [],
             interceptors: [],
             guards: [],
@@ -102,7 +95,10 @@ export class AngularDependencies extends FrameworkDependencies {
             let filePath = file.fileName;
 
             if (path.extname(filePath) === '.ts') {
-                if (!this.configuration.mainData.angularJSProject && path.extname(filePath) === '.js') {
+                if (
+                    !this.configuration.mainData.angularJSProject &&
+                    path.extname(filePath) === '.js'
+                ) {
                     logger.info('parsing', filePath);
                     this.getSourceFileDecorators(file, deps);
                 } else {
@@ -170,6 +166,7 @@ export class AngularDependencies extends FrameworkDependencies {
                     };
                     process(mod.imports, _variable);
                     process(mod.exports, _variable);
+                    process(mod.controllers, _variable);
                     process(mod.declarations, _variable);
                     process(mod.providers, _variable);
                 };
@@ -208,7 +205,10 @@ export class AngularDependencies extends FrameworkDependencies {
         let name = this.getSymboleName(node);
         let IO = this.getClassIO(file, srcFile, node, fileBody);
         let sourceCode = srcFile.getText();
-        let hash = crypto.createHash('md5').update(sourceCode).digest('hex');
+        let hash = crypto
+            .createHash('md5')
+            .update(sourceCode)
+            .digest('hex');
         let deps: any = {
             name,
             id: 'class-' + name + '-' + hash,
@@ -334,19 +334,22 @@ export class AngularDependencies extends FrameworkDependencies {
             }
             let parseNode = (file, srcFile, node, fileBody) => {
                 let sourceCode = srcFile.getText();
-                let hash = crypto.createHash('md5').update(sourceCode).digest('hex');
+                let hash = crypto
+                    .createHash('md5')
+                    .update(sourceCode)
+                    .digest('hex');
 
                 if (node.decorators) {
                     let classWithCustomDecorator = false;
-                    let visitNode = (visitedNode, index) => {
+                    let visitDecorator = (visitedDecorator, index) => {
                         let deps: IDep;
 
                         let metadata = node.decorators;
                         let name = this.getSymboleName(node);
-                        let props = this.findProperties(visitedNode, srcFile);
+                        let props = this.findProperties(visitedDecorator, srcFile);
                         let IO = this.componentHelper.getComponentIO(file, srcFile, node, fileBody);
 
-                        if (this.isModule(metadata)) {
+                        if (this.isModule(visitedDecorator)) {
                             const moduleDep = new ModuleDepFactory(this.moduleHelper).create(
                                 file,
                                 srcFile,
@@ -367,7 +370,7 @@ export class AngularDependencies extends FrameworkDependencies {
                                 outputSymbols.modules.push(moduleDep);
                                 outputSymbols.modulesForGraph.push(moduleDep);
                             }
-                        } else if (this.isComponent(metadata)) {
+                        } else if (this.isComponent(visitedDecorator)) {
                             if (props.length === 0) {
                                 return;
                             }
@@ -380,7 +383,19 @@ export class AngularDependencies extends FrameworkDependencies {
                                 $componentsTreeEngine.addComponent(componentDep);
                                 outputSymbols.components.push(componentDep);
                             }
-                        } else if (this.isInjectable(metadata)) {
+                        } else if (this.isController(visitedDecorator)) {
+                            const controllerDep = new ControllerDepFactory().create(
+                                file,
+                                srcFile,
+                                name,
+                                props,
+                                IO
+                            );
+                            deps = controllerDep;
+                            if (typeof IO.ignore === 'undefined') {
+                                outputSymbols.controllers.push(controllerDep);
+                            }
+                        } else if (this.isInjectable(visitedDecorator)) {
                             let injectableDeps: IInjectableDep = {
                                 name,
                                 id: 'injectable-' + name + '-' + hash,
@@ -412,10 +427,13 @@ export class AngularDependencies extends FrameworkDependencies {
                                     outputSymbols.guards.push(injectableDeps);
                                 } else {
                                     injectableDeps.type = 'injectable';
-                                    this.addNewEntityInStore(injectableDeps, outputSymbols.injectables);
+                                    this.addNewEntityInStore(
+                                        injectableDeps,
+                                        outputSymbols.injectables
+                                    );
                                 }
                             }
-                        } else if (this.isPipe(metadata)) {
+                        } else if (this.isPipe(visitedDecorator)) {
                             let pipeDeps: IPipeDep = {
                                 name,
                                 id: 'pipe-' + name + '-' + hash,
@@ -438,7 +456,7 @@ export class AngularDependencies extends FrameworkDependencies {
                             if (typeof IO.ignore === 'undefined') {
                                 outputSymbols.pipes.push(pipeDeps);
                             }
-                        } else if (this.isDirective(metadata)) {
+                        } else if (this.isDirective(visitedDecorator)) {
                             if (props.length === 0) {
                                 return;
                             }
@@ -451,8 +469,14 @@ export class AngularDependencies extends FrameworkDependencies {
                                 outputSymbols.directives.push(directiveDeps);
                             }
                         } else {
+                            let hasMultipleDecoratorsWithInternalOne = this.hasInternalDecorator(
+                                node.decorators
+                            );
                             // Just a class
-                            if (!classWithCustomDecorator) {
+                            if (
+                                !classWithCustomDecorator &&
+                                !hasMultipleDecoratorsWithInternalOne
+                            ) {
                                 classWithCustomDecorator = true;
                                 this.processClass(node, file, srcFile, outputSymbols, fileBody);
                             }
@@ -482,7 +506,7 @@ export class AngularDependencies extends FrameworkDependencies {
                         return false;
                     };
 
-                    node.decorators.filter(filterByDecorators).forEach(visitNode);
+                    node.decorators.filter(filterByDecorators).forEach(visitDecorator);
                 } else if (node.symbol) {
                     if (node.symbol.flags === ts.SymbolFlags.Class) {
                         this.processClass(node, file, srcFile, outputSymbols, fileBody);
@@ -629,7 +653,10 @@ export class AngularDependencies extends FrameworkDependencies {
                                 );
                             }
                             if (typeof node.thenStatement !== 'undefined') {
-                                if (node.thenStatement.statements && node.thenStatement.statements.length > 0) {
+                                if (
+                                    node.thenStatement.statements &&
+                                    node.thenStatement.statements.length > 0
+                                ) {
                                     let firstStatement = node.thenStatement.statements[0];
                                     resultNode = this.findExpressionByNameInExpressions(
                                         firstStatement.expression,
@@ -854,32 +881,60 @@ export class AngularDependencies extends FrameworkDependencies {
         return result;
     }
 
-    private isComponent(metadatas) {
-        return this.parseDecorators(metadatas, 'Component');
+    private parseDecorator(decorator, type: string): boolean {
+        let result = false;
+        if (decorator.expression.expression) {
+            if (decorator.expression.expression.text === type) {
+                result = true;
+            }
+        }
+        return result;
     }
 
-    private isPipe(metadatas) {
-        return this.parseDecorators(metadatas, 'Pipe');
+    private isController(metadata) {
+        return this.parseDecorator(metadata, 'Controller');
     }
 
-    private isDirective(metadatas) {
-        return this.parseDecorators(metadatas, 'Directive');
+    private isComponent(metadata) {
+        return this.parseDecorator(metadata, 'Component');
     }
 
-    private isInjectable(metadatas) {
-        return this.parseDecorators(metadatas, 'Injectable');
+    private isPipe(metadata) {
+        return this.parseDecorator(metadata, 'Pipe');
     }
 
-    private isGuard (ioImplements: string[]): boolean {
-        return _.includes(ioImplements, 'CanActivate') ||
+    private isDirective(metadata) {
+        return this.parseDecorator(metadata, 'Directive');
+    }
+
+    private isInjectable(metadata) {
+        return this.parseDecorator(metadata, 'Injectable');
+    }
+
+    private isModule(metadata) {
+        return this.parseDecorator(metadata, 'NgModule') || this.parseDecorator(metadata, 'Module');
+    }
+
+    private hasInternalDecorator(metadatas) {
+        return (
+            this.parseDecorators(metadatas, 'Controller') ||
+            this.parseDecorators(metadatas, 'Component') ||
+            this.parseDecorators(metadatas, 'Pipe') ||
+            this.parseDecorators(metadatas, 'Directive') ||
+            this.parseDecorators(metadatas, 'Injectable') ||
+            this.parseDecorators(metadatas, 'NgModule') ||
+            this.parseDecorators(metadatas, 'Module')
+        );
+    }
+
+    private isGuard(ioImplements: string[]): boolean {
+        return (
+            _.includes(ioImplements, 'CanActivate') ||
             _.includes(ioImplements, 'CanActivateChild') ||
             _.includes(ioImplements, 'CanDeactivate') ||
             _.includes(ioImplements, 'Resolve') ||
-            _.includes(ioImplements, 'CanLoad');
-    }
-
-    private isModule(metadatas) {
-        return this.parseDecorators(metadatas, 'NgModule');
+            _.includes(ioImplements, 'CanLoad')
+        );
     }
 
     private getSymboleName(node): string {
@@ -899,6 +954,8 @@ export class AngularDependencies extends FrameworkDependencies {
 
             if (pop && pop.properties && pop.properties.length >= 0) {
                 return pop.properties;
+            } else if (pop && pop.kind && pop.kind === SyntaxKind.StringLiteral) {
+                return [pop];
             } else {
                 logger.warn('Empty metadatas, trying to found it with imports.');
                 return this.importsUtil.findValueInImportOrLocalVariables(pop.text, sourceFile);
@@ -1045,8 +1102,8 @@ export class AngularDependencies extends FrameworkDependencies {
                     name: node.declarationList.declarations[i].name.text,
                     defaultValue: node.declarationList.declarations[i].initializer
                         ? this.classHelper.stringifyDefaultValue(
-                            node.declarationList.declarations[i].initializer
-                        )
+                              node.declarationList.declarations[i].initializer
+                          )
                         : undefined
                 };
                 if (node.declarationList.declarations[i].initializer) {
@@ -1187,5 +1244,4 @@ export class AngularDependencies extends FrameworkDependencies {
 
         return res[0] || {};
     }
-
 }
